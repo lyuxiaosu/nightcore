@@ -1,5 +1,7 @@
 #!/bin/bash
 
+git submodule update --init --recursive
+
 SCRIPT_PATH=$(readlink -f $0)
 BASE_DIR=$(dirname $SCRIPT_PATH)
 CMAKE_BUILD_TYPE="Release"
