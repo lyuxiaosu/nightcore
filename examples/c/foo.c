@@ -30,7 +30,7 @@ int faas_destroy_func_worker(void* worker_handle) {
     return 0;
 }
 
-static const char* kOutputPrefix = "From function Bar: ";
+/*static const char* kOutputPrefix = "From function Bar: ";
 
 int faas_func_call(void* worker_handle, const char* input, size_t input_length) {
     struct worker_context* context = (struct worker_context*)worker_handle;
@@ -48,5 +48,21 @@ int faas_func_call(void* worker_handle, const char* input, size_t input_length) 
     context->append_output_fn(context->caller_context,
                               output_buffer, strlen(kOutputPrefix) + bar_output_length);
     free(output_buffer);
+    return 0;
+}
+*/
+static const char* kOutputPrefix = "Hello world foo ";
+
+int faas_func_call(void* worker_handle, const char* input, size_t input_length) {
+    /*
+    struct worker_context* context = (struct worker_context*)worker_handle;
+    
+    char* output_buffer = (char*)malloc(strlen(kOutputPrefix));
+    memcpy(output_buffer, kOutputPrefix, strlen(kOutputPrefix));
+    context->append_output_fn(context->caller_context,
+                              output_buffer, strlen(kOutputPrefix));
+    free(output_buffer);
+    */
+
     return 0;
 }

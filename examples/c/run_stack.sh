@@ -26,10 +26,10 @@ $NIGHTCORE_ROOT/bin/$BUILD_TYPE/launcher \
     --fprocess="$NIGHTCORE_ROOT/bin/$BUILD_TYPE/func_worker_v1 $BASE_DIR/libfoo.so" \
     --v=1 2>$BASE_DIR/outputs/launcher_foo.log &
 
-$NIGHTCORE_ROOT/bin/$BUILD_TYPE/launcher \
-    --func_id=2 --fprocess_mode=cpp \
-    --fprocess_output_dir=$BASE_DIR/outputs \
-    --fprocess="$NIGHTCORE_ROOT/bin/$BUILD_TYPE/func_worker_v1 $BASE_DIR/libbar.so" \
-    --v=1 2>$BASE_DIR/outputs/launcher_bar.log &
+#$NIGHTCORE_ROOT/bin/$BUILD_TYPE/launcher \
+#    --func_id=2 --fprocess_mode=cpp \
+#    --fprocess_output_dir=$BASE_DIR/outputs \
+#    --fprocess="$NIGHTCORE_ROOT/bin/$BUILD_TYPE/func_worker_v1 $BASE_DIR/libbar.so" \
+#    --v=1 2>$BASE_DIR/outputs/launcher_bar.log &
 
 wait
