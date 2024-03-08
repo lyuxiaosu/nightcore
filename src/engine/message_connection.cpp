@@ -47,6 +47,7 @@ uv_stream_t* MessageConnection::InitUVHandle(uv_loop_t* uv_loop) {
     return uv_handle_;
 }
 
+//This MessageConnection is the connection comming from Launcher or Fun worker 
 void MessageConnection::Start(server::IOWorker* io_worker) {
     DCHECK(state_ == kCreated);
     DCHECK_IN_EVENT_LOOP_THREAD(uv_handle_->loop);
@@ -124,6 +125,7 @@ void MessageConnection::RecvHandshakeMessage() {
     UV_DCHECK_OK(uv_read_stop(uv_handle_));
     Message* message = reinterpret_cast<Message*>(message_buffer_.data());
     func_id_ = message->func_id;
+    //differencitate it's the launcher or fun worker
     if (IsLauncherHandshakeMessage(*message)) {
         client_id_ = 0;
         log_header_ = fmt::format("LauncherConnection[{}]: ", func_id_);

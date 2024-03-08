@@ -117,6 +117,7 @@ UV_ALLOC_CB_FOR_CLASS(GatewayConnection, BufferAlloc) {
     io_worker_->NewReadBuffer(suggested_size, buf);
 }
 
+//Process the request that received from the gateway
 UV_READ_CB_FOR_CLASS(GatewayConnection, RecvData) {
     auto reclaim_worker_resource = gsl::finally([this, buf] {
         if (buf->base != 0) {

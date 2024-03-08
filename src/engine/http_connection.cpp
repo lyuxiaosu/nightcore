@@ -1,7 +1,7 @@
-#include "gateway/http_connection.h"
+#include "engine/http_connection.h"
 
 #include "common/time.h"
-#include "gateway/server.h"
+#include "engine/engine.h"
 
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
@@ -10,10 +10,10 @@ using json = nlohmann::json;
 #define HVLOG(l) VLOG(l) << log_header_
 
 namespace faas {
-namespace gateway {
+namespace engine {
 
-HttpConnection::HttpConnection(Server* server, int connection_id)
-    : server::ConnectionBase(kTypeId), server_(server), io_worker_(nullptr), state_(kCreated),
+HttpConnection::HttpConnection(Engine* engine, int connection_id)
+    : server::ConnectionBase(kTypeId), engine_(engine), io_worker_(nullptr), state_(kCreated),
       log_header_(fmt::format("HttpConnection[{}]: ", connection_id)) {
     http_parser_init(&http_parser_, HTTP_REQUEST);
     http_parser_.data = this;
@@ -299,7 +299,7 @@ void HttpConnection::OnNewHttpRequest(std::string_view method, std::string_view 
         return;
     }
     std::string_view func_name = absl::StripPrefix(path, "/function/");
-    auto func_entry = server_->func_config()->find_by_func_name(func_name);
+    auto func_entry = engine_->func_config()->find_by_func_name(func_name);
     if (func_entry == nullptr || (!func_entry->allow_http_get && method == "GET")) {
         SendHttpResponse(HttpStatus::NOT_FOUND);
         return;
@@ -317,10 +317,10 @@ void HttpConnection::OnNewHttpRequest(std::string_view method, std::string_view 
     } else {
         func_call_context_.append_input(body_buffer_.to_span());
     }
-    server_->OnNewHttpFuncCall(this, &func_call_context_);
+    engine_->OnNewHttpFuncCall(this, &func_call_context_);
 }
 
-void HttpConnection::OnFuncCallFinished(FuncCallContext* func_call_context) {
+void HttpConnection::OnFuncCallFinished(gateway::FuncCallContext* func_call_context) {
     DCHECK(func_call_context == &func_call_context_);
     io_worker_->ScheduleFunction(
         this, absl::bind_front(&HttpConnection::OnFuncCallFinishedInternal, this));
@@ -366,14 +366,14 @@ void HttpConnection::OnFuncCallFinishedInternal() {
         return;
     }
     switch (func_call_context_.status()) {
-    case FuncCallContext::kSuccess:
+    case gateway::FuncCallContext::kSuccess:
         SendHttpResponse(HttpStatus::OK, func_call_context_.output());
         break;
-    case FuncCallContext::kNotFound:
+    case gateway::FuncCallContext::kNotFound:
         SendHttpResponse(HttpStatus::NOT_FOUND);
         break;
-    case FuncCallContext::kNoNode:
-    case FuncCallContext::kFailed:
+    case gateway::FuncCallContext::kNoNode:
+    case gateway::FuncCallContext::kFailed:
         SendHttpResponse(HttpStatus::INTERNAL_SERVER_ERROR);
         break;
     default:
@@ -424,5 +424,5 @@ int HttpConnection::HttpParserOnMessageCompleteCallback(http_parser* http_parser
     return 0;
 }
 
-}  // namespace gateway
+}  // namespace engine 
 }  // namespace faas

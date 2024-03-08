@@ -45,10 +45,14 @@ Engine::Engine()
       engine_tcp_port_(-1),
       func_worker_use_engine_socket_(absl::GetFlag(FLAGS_func_worker_use_engine_socket)),
       use_fifo_for_nested_call_(absl::GetFlag(FLAGS_use_fifo_for_nested_call)),
+      next_call_id_(1),
       uv_handle_(nullptr),
       next_gateway_conn_worker_id_(0),
       next_ipc_conn_worker_id_(0),
       next_gateway_conn_id_(0),
+      next_http_connection_id_(0),
+      next_http_conn_worker_id_(0),
+      max_running_requests_(0),
       worker_manager_(new WorkerManager(this)),
       monitor_(absl::GetFlag(FLAGS_disable_monitor) ? nullptr : new Monitor(this)),
       tracer_(new Tracer(this)),
@@ -57,16 +61,23 @@ Engine::Engine()
       incoming_external_requests_stat_(
           stat::Counter::StandardReportCallback("incoming_external_requests")),
       incoming_internal_requests_stat_(
-          stat::Counter::StandardReportCallback("incoming_internal_requests")),
+          stat::Counter::StandardReportCallback("incoming_internal_requests")), 
       external_requests_instant_rps_stat_(
           stat::StatisticsCollector<float>::StandardReportCallback("external_requests_instant_rps")),
       inflight_external_requests_stat_(
           stat::StatisticsCollector<uint16_t>::StandardReportCallback("inflight_external_requests")),
+      running_requests_stat_(
+          stat::StatisticsCollector<uint16_t>::StandardReportCallback("running_requests")),
       message_delay_stat_(
           stat::StatisticsCollector<int32_t>::StandardReportCallback("message_delay")),
+      dispatch_overhead_stat_(
+          stat::StatisticsCollector<int32_t>::StandardReportCallback("dispatch_overhead")),
       input_use_shm_stat_(stat::Counter::StandardReportCallback("input_use_shm")),
       output_use_shm_stat_(stat::Counter::StandardReportCallback("output_use_shm")),
       discarded_func_call_stat_(stat::Counter::StandardReportCallback("discarded_func_call")) {
+    
+    UV_CHECK_OK(uv_tcp_init(uv_loop(), &uv_http_handle_));
+    uv_http_handle_.data = this;
 }
 
 Engine::~Engine() {
@@ -105,6 +116,18 @@ void Engine::StartInternal() {
         UV_CHECK_OK(uv_tcp_connect(req, uv_handle, (const struct sockaddr *)&addr,
                                    &Engine::GatewayConnectCallback));
     }
+    struct sockaddr_in bind_addr;
+    CHECK(!address_.empty());
+    CHECK_NE(http_port_, -1);
+
+    // Listen on address:http_port for HTTP requests
+    UV_CHECK_OK(uv_ip4_addr(address_.c_str(), http_port_, &bind_addr));
+    UV_CHECK_OK(uv_tcp_bind(&uv_http_handle_, (const struct sockaddr *)&bind_addr, 0));
+    HLOG(INFO) << fmt::format("Listen on {}:{} for HTTP requests", address_, http_port_);
+    UV_CHECK_OK(uv_listen(
+        UV_AS_STREAM(&uv_http_handle_), listen_backlog_,
+        &Engine::HttpConnectionCallback));
+
     // Listen on ipc_path
     if (engine_tcp_port_ == -1) {
         uv_pipe_t* pipe_handle = reinterpret_cast<uv_pipe_t*>(malloc(sizeof(uv_pipe_t)));
@@ -133,6 +156,7 @@ void Engine::StartInternal() {
 
 void Engine::StopInternal() {
     uv_close(UV_AS_HANDLE(uv_handle_), nullptr);
+    uv_close(UV_AS_HANDLE(&uv_http_handle_), nullptr);
 }
 
 void Engine::OnConnectionClose(server::ConnectionBase* connection) {
@@ -155,6 +179,10 @@ void Engine::OnConnectionClose(server::ConnectionBase* connection) {
         HLOG(WARNING) << fmt::format("Gateway connection (conn_id={}) disconencted",
                                      gateway_connection->conn_id());
         gateway_connections_.erase(connection->id());
+    } else if (connection->type() == HttpConnection::kTypeId) {
+        absl::MutexLock lk(&mu_);
+        DCHECK(connections_.contains(connection->id()));
+        connections_.erase(connection->id());
     } else {
         HLOG(ERROR) << "Unknown connection type!";
     }
@@ -210,6 +238,7 @@ bool Engine::OnNewHandshake(MessageConnection* connection,
     return true;
 }
 
+// Gateway send a request to engine
 void Engine::OnRecvGatewayMessage(GatewayConnection* connection, const GatewayMessage& message,
                                   std::span<const char> payload) {
     if (IsDispatchFuncCallMessage(message)) {
@@ -220,6 +249,7 @@ void Engine::OnRecvGatewayMessage(GatewayConnection* connection, const GatewayMe
     }
 }
 
+// This is the message comming from Fun worker, either function result or internal invoking
 void Engine::OnRecvMessage(MessageConnection* connection, const Message& message) {
     int32_t message_delay = ComputeMessageDelay(message);
     if (IsInvokeFuncMessage(message)) {
@@ -316,6 +346,37 @@ void Engine::OnRecvMessage(MessageConnection* connection, const Message& message
     ProcessDiscardedFuncCallIfNecessary();
 }
 
+//This is the http connection
+void Engine::OnNewFuncCallCommon(std::shared_ptr<server::ConnectionBase> parent_connection,
+                                 gateway::FuncCallContext* func_call_context) {
+    FuncCall func_call = func_call_context->func_call();
+    bool server_overloaded = false;
+    {
+        absl::MutexLock lk(&mu_);
+        int64_t current_timestamp = GetMonotonicMicroTimestamp();
+            FuncCallState state = {
+                .func_call = func_call,
+                .connection_id = parent_connection->id(),
+                .context = func_call_context,
+                .recv_timestamp = current_timestamp,
+                .dispatch_timestamp = 0
+            };
+            if (max_running_requests_ > 0 && running_func_calls_.size() >= max_running_requests_) {
+                pending_func_calls_.push(std::move(state));
+                server_overloaded = true;
+            } else {
+                state.dispatch_timestamp = current_timestamp;
+                running_func_calls_[func_call.full_call_id] = std::move(state);
+                running_requests_stat_.AddSample(
+                    gsl::narrow_cast<uint16_t>(running_func_calls_.size()));
+            }
+        }
+    if (server_overloaded) {
+        return;
+    }
+}
+
+// This is the function request comming from gateway
 void Engine::OnExternalFuncCall(const FuncCall& func_call, std::span<const char> input) {
     inflight_external_requests_.fetch_add(1);
     std::unique_ptr<ipc::ShmRegion> input_region = nullptr;
@@ -377,20 +438,76 @@ void Engine::OnExternalFuncCall(const FuncCall& func_call, std::span<const char>
     }
 }
 
+// The function is finished, get the result back
 void Engine::ExternalFuncCallCompleted(const protocol::FuncCall& func_call,
                                        std::span<const char> output, int32_t processing_time) {
     inflight_external_requests_.fetch_add(-1);
     server::IOWorker* io_worker = server::IOWorker::current();
     DCHECK(io_worker != nullptr);
-    server::ConnectionBase* gateway_connection = io_worker->PickConnection(
-        GatewayConnection::kTypeId);
-    if (gateway_connection == nullptr) {
-        HLOG(ERROR) << "There is not GatewayConnection associated with current IOWorker";
-        return;
+
+    if (func_call.func_id > 10) { 
+        /* This request comes from external client */
+        OnRecvWorkerMessage(func_call, output, processing_time);
+    } else {
+        /* This request comes from gateway */
+    	server::ConnectionBase* gateway_connection = io_worker->PickConnection(
+        	GatewayConnection::kTypeId);
+    	if (gateway_connection == nullptr) {
+            HLOG(ERROR) << "There is not GatewayConnection associated with current IOWorker";
+            return;
+    	}
+    	GatewayMessage message = NewFuncCallCompleteGatewayMessage(func_call, processing_time);
+    	message.payload_size = output.size();
+    	gateway_connection->as_ptr<GatewayConnection>()->SendMessage(message, output);
     }
-    GatewayMessage message = NewFuncCallCompleteGatewayMessage(func_call, processing_time);
-    message.payload_size = output.size();
-    gateway_connection->as_ptr<GatewayConnection>()->SendMessage(message, output);
+}
+
+void Engine::OnRecvWorkerMessage(const protocol::FuncCall& func_call,
+                                 std::span<const char> payload, int32_t processing_time) {
+    int64_t current_timestamp = GetMonotonicMicroTimestamp();
+    gateway::FuncCallContext* func_call_context = nullptr;
+    std::shared_ptr<server::ConnectionBase> connection;
+        {
+            absl::MutexLock lk(&mu_);
+            if (running_func_calls_.contains(func_call.full_call_id)) {
+                const FuncCallState& full_call_state = running_func_calls_[func_call.full_call_id];
+                // Check if corresponding connection is still active
+                if (connections_.contains(full_call_state.connection_id)) {
+                    connection = connections_[full_call_state.connection_id];
+                    func_call_context = full_call_state.context;
+                }
+                dispatch_overhead_stat_.AddSample(gsl::narrow_cast<int32_t>(
+                    current_timestamp - full_call_state.dispatch_timestamp - processing_time));
+                running_func_calls_.erase(func_call.full_call_id);
+                FuncCallState state;
+                if (max_running_requests_ == 0 || running_func_calls_.size() < max_running_requests_) {
+                    while (!pending_func_calls_.empty()) {
+                        state = std::move(pending_func_calls_.front());
+                        pending_func_calls_.pop();
+                        if (connections_.contains(state.connection_id)) {
+                            break;
+                        }
+                    }
+                }
+            } else {
+		printf("running_func_calls_ doesn't contain state\n");
+	    }
+        }
+        if (func_call_context != nullptr) {
+            func_call_context->set_status(gateway::FuncCallContext::kSuccess);
+            func_call_context->append_output(payload);
+            FinishFuncCall(std::move(connection), func_call_context);
+        }
+}
+
+void Engine::FinishFuncCall(std::shared_ptr<server::ConnectionBase> parent_connection,
+                            gateway::FuncCallContext* func_call_context) {
+    switch (parent_connection->type()) {
+    case HttpConnection::kTypeId:
+        parent_connection->as_ptr<HttpConnection>()->OnFuncCallFinished(func_call_context);
+        break;
+    }
+
 }
 
 void Engine::ExternalFuncCallFailed(const protocol::FuncCall& func_call, int status_code) {
@@ -405,6 +522,21 @@ void Engine::ExternalFuncCallFailed(const protocol::FuncCall& func_call, int sta
     }
     GatewayMessage message = NewFuncCallFailedGatewayMessage(func_call, status_code);
     gateway_connection->as_ptr<GatewayConnection>()->SendMessage(message);
+}
+
+void Engine::OnNewHttpFuncCall(HttpConnection* connection, gateway::FuncCallContext* func_call_context) {
+    auto func_entry = func_config_.find_by_func_name(func_call_context->func_name());
+    if (func_entry == nullptr) {
+        func_call_context->set_status(gateway::FuncCallContext::kNotFound);
+        connection->OnFuncCallFinished(func_call_context);
+        return;
+    }
+    FuncCall func_call = faas::protocol::NewFuncCall(gsl::narrow_cast<uint16_t>(func_entry->func_id),
+                                     /* client_id= */ 0, next_call_id_.fetch_add(1));
+    VLOG(1) << "OnNewHttpFuncCall: " << FuncCallDebugString(func_call);
+    func_call_context->set_func_call(func_call);
+    OnNewFuncCallCommon(connection->ref_self(), func_call_context);
+    OnExternalFuncCall(func_call, func_call_context->input());
 }
 
 Dispatcher* Engine::GetOrCreateDispatcher(uint16_t func_id) {
@@ -474,6 +606,32 @@ void Engine::ProcessDiscardedFuncCallIfNecessary() {
                 // TODO: handle this case
             }
         }
+    }
+}
+
+UV_CONNECTION_CB_FOR_CLASS(Engine, HttpConnection) {
+    if (status != 0) {
+        HLOG(WARNING) << "Failed to open HTTP connection: " << uv_strerror(status);
+        return;
+    }
+    std::shared_ptr<server::ConnectionBase> connection(
+        new HttpConnection(this, next_http_connection_id_++));
+    uv_tcp_t* client = reinterpret_cast<uv_tcp_t*>(malloc(sizeof(uv_tcp_t)));
+    UV_DCHECK_OK(uv_tcp_init(uv_loop(), client));
+    if (uv_accept(UV_AS_STREAM(&uv_http_handle_), UV_AS_STREAM(client)) == 0) {
+        DCHECK_LT(next_http_conn_worker_id_, io_workers_.size());
+        server::IOWorker* io_worker = io_workers_[next_http_conn_worker_id_];
+        next_http_conn_worker_id_ = (next_http_conn_worker_id_ + 1) % io_workers_.size();
+        RegisterConnection(io_worker, connection.get(), UV_AS_STREAM(client));
+        DCHECK_GE(connection->id(), 0);
+        {
+            absl::MutexLock lk(&mu_);
+            DCHECK(!connections_.contains(connection->id()));
+            connections_[connection->id()] = std::move(connection);
+        }
+    } else {
+        LOG(ERROR) << "Failed to accept new HTTP connection";
+        free(client);
     }
 }
 

@@ -8,6 +8,7 @@
 #include "server/server_base.h"
 #include "engine/gateway_connection.h"
 #include "engine/message_connection.h"
+#include "engine/http_connection.h"
 #include "engine/dispatcher.h"
 #include "engine/worker_manager.h"
 #include "engine/monitor.h"
@@ -30,6 +31,8 @@ public:
         gateway_addr_ = std::string(addr);
         gateway_port_ = port;
     }
+    void set_address(std::string_view address) { address_ = std::string(address); }
+    void set_http_port(int port) { http_port_ = port; }
     void set_num_io_workers(int value) { num_io_workers_ = value; }
     void set_gateway_conn_per_worker(int value) { gateway_conn_per_worker_ = value; }
     void set_node_id(uint16_t value) { node_id_ = value; }
@@ -57,6 +60,7 @@ public:
     void OnRecvGatewayMessage(GatewayConnection* connection,
                               const protocol::GatewayMessage& message,
                               std::span<const char> payload);
+    void OnNewHttpFuncCall(HttpConnection* connection, gateway::FuncCallContext* func_call_context);
     Dispatcher* GetOrCreateDispatcher(uint16_t func_id);
     void DiscardFuncCall(const protocol::FuncCall& func_call);
 
@@ -69,6 +73,8 @@ private:
     int num_io_workers_;
     int gateway_conn_per_worker_;
     int engine_tcp_port_;
+    std::string address_;
+    int http_port_;
     uint16_t node_id_;
     std::string func_config_file_;
     std::string func_config_json_;
@@ -76,12 +82,18 @@ private:
     bool func_worker_use_engine_socket_;
     bool use_fifo_for_nested_call_;
 
+    std::atomic<uint32_t> next_call_id_;
+
+    uv_tcp_t uv_http_handle_;
     uv_stream_t* uv_handle_;
 
     std::vector<server::IOWorker*> io_workers_;
     size_t next_gateway_conn_worker_id_;
     size_t next_ipc_conn_worker_id_;
     uint16_t next_gateway_conn_id_;
+    int next_http_connection_id_;
+    size_t next_http_conn_worker_id_;
+    size_t max_running_requests_;
 
     absl::flat_hash_map</* id */ int, std::shared_ptr<server::ConnectionBase>> message_connections_;
     absl::flat_hash_map</* id */ int, std::shared_ptr<server::ConnectionBase>> gateway_connections_;
@@ -91,11 +103,25 @@ private:
 
     std::atomic<int> inflight_external_requests_;
 
+    struct FuncCallState {
+        protocol::FuncCall func_call;
+        int                connection_id;  // of HttpConnection or GrpcConnection
+        gateway::FuncCallContext*   context;
+        int64_t            recv_timestamp;
+        int64_t            dispatch_timestamp;
+    };
+
     absl::Mutex mu_;
     absl::flat_hash_map</* full_call_id */ uint64_t, std::unique_ptr<ipc::ShmRegion>>
         external_func_call_shm_inputs_ ABSL_GUARDED_BY(mu_);
     absl::flat_hash_map</* func_id */ uint16_t, std::unique_ptr<Dispatcher>>
         dispatchers_ ABSL_GUARDED_BY(mu_);
+
+    absl::flat_hash_map</* full_call_id */ uint64_t, FuncCallState>
+        running_func_calls_ ABSL_GUARDED_BY(mu_);
+
+    std::queue<FuncCallState> pending_func_calls_ ABSL_GUARDED_BY(mu_);
+
     std::vector<protocol::FuncCall> discarded_func_calls_ ABSL_GUARDED_BY(mu_);
 
     int64_t last_external_request_timestamp_ ABSL_GUARDED_BY(mu_);
@@ -103,8 +129,15 @@ private:
     stat::Counter incoming_internal_requests_stat_ ABSL_GUARDED_BY(mu_);
     stat::StatisticsCollector<float> external_requests_instant_rps_stat_ ABSL_GUARDED_BY(mu_);
     stat::StatisticsCollector<uint16_t> inflight_external_requests_stat_ ABSL_GUARDED_BY(mu_);
+    stat::StatisticsCollector<uint16_t> running_requests_stat_ ABSL_GUARDED_BY(mu_);
+
+    absl::flat_hash_map</* connection_id */ int,
+                        std::shared_ptr<server::ConnectionBase>>
+        connections_ ABSL_GUARDED_BY(mu_); /* http connections */
 
     stat::StatisticsCollector<int32_t> message_delay_stat_ ABSL_GUARDED_BY(mu_);
+    stat::StatisticsCollector<int32_t> dispatch_overhead_stat_ ABSL_GUARDED_BY(mu_);
+
     stat::Counter input_use_shm_stat_ ABSL_GUARDED_BY(mu_);
     stat::Counter output_use_shm_stat_ ABSL_GUARDED_BY(mu_);
     stat::Counter discarded_func_call_stat_ ABSL_GUARDED_BY(mu_);
@@ -114,6 +147,13 @@ private:
     void OnConnectionClose(server::ConnectionBase* connection) override;
 
     void OnExternalFuncCall(const protocol::FuncCall& func_call, std::span<const char> input);
+    void OnRecvWorkerMessage(const protocol::FuncCall& func_call,
+                                 std::span<const char> payload, int32_t processing_time);
+    void OnNewFuncCallCommon(std::shared_ptr<server::ConnectionBase> parent_connection,
+                                 gateway::FuncCallContext* func_call_context);
+    void FinishFuncCall(std::shared_ptr<server::ConnectionBase> parent_connection,
+                            gateway::FuncCallContext* func_call_context);
+
     void ExternalFuncCallCompleted(const protocol::FuncCall& func_call,
                                    std::span<const char> output, int32_t processing_time);
     void ExternalFuncCallFailed(const protocol::FuncCall& func_call, int status_code = 0);
@@ -125,6 +165,7 @@ private:
 
     DECLARE_UV_CONNECT_CB_FOR_CLASS(GatewayConnect);
     DECLARE_UV_CONNECTION_CB_FOR_CLASS(MessageConnection);
+    DECLARE_UV_CONNECTION_CB_FOR_CLASS(HttpConnection);
 
     DISALLOW_COPY_AND_ASSIGN(Engine);
 };

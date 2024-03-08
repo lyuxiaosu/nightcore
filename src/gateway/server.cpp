@@ -135,6 +135,7 @@ void Server::OnConnectionClose(server::ConnectionBase* connection) {
     }
 }
 
+// modify this function in engine, this is get the http request from client side, func_call_context->input()
 void Server::OnNewHttpFuncCall(HttpConnection* connection, FuncCallContext* func_call_context) {
     auto func_entry = func_config_.find_by_func_name(func_call_context->func_name());
     if (func_entry == nullptr) {
