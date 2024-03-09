@@ -1,0 +1,1 @@
+curl -w "DNS time: %{time_namelookup}s\nTCP connect time: %{time_connect}s\nPreXfer time: %{time_pretransfer}s\nStartXfer time: %{time_starttransfer}s\nTotal time: %{time_total}s\n" -o /dev/null -s -X POST http://10.10.1.1:8081/function/Foo http://10.10.1.1:8081/function/Foo 
