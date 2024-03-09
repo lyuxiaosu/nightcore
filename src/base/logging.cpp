@@ -36,6 +36,8 @@ static pid_t __gettid() {
 #define __PREDICT_FALSE(x) __builtin_expect(x, 0)
 #define __ATTRIBUTE_UNUSED __attribute__((unused))
 
+#define DEBUG 0
+
 namespace faas {
 namespace logging {
 
@@ -43,10 +45,12 @@ namespace {
 
 int vlog_level = 0;
 
+#if DEBUG
 const char* GetBasename(const char* file_path) {
     const char* slash = strrchr(file_path, '/');
     return slash ? slash + 1 : file_path;
 }
+#endif
 
 void Abort() {
 #ifdef __FAAS_SRC
@@ -72,6 +76,7 @@ __ATTRIBUTE_UNUSED static constexpr const char* kLogSeverityNames[4] = {
 static constexpr const char* kLogSeverityShortNames = "IWEF";
 
 LogMessage::LogMessage(const char* file, int line, LogSeverity severity, bool append_err_str) {
+#if DEBUG    
     severity_ = severity;
     preserved_errno_ = errno;
     append_err_str_ = append_err_str;
@@ -102,24 +107,34 @@ LogMessage::LogMessage(const char* file, int line, LogSeverity severity, bool ap
     sprintf(buffer+21, " %d", static_cast<int>(__gettid()));
 #endif
     stream() << fmt::format("{} {}:{}] ", buffer, filename, line);
+
+#endif
 }
 
 LogMessage::~LogMessage() {
+#if DEBUG 
     AppendErrStrIfNecessary();
     std::string message_text = stream_.str();
     SendToLog(message_text);
     if (severity_ == FATAL) {
         Abort();
     }
+#endif
 }
 
 LogMessageFatal::LogMessageFatal(const char* file, int line, const std::string& result)
-    : LogMessage(file, line, FATAL) { stream() << fmt::format("Check failed: {} ", result); }
+    : LogMessage(file, line, FATAL) { 
+#if DEBUG
+    stream() << fmt::format("Check failed: {} ", result); 
+#endif
+}
 
 LogMessageFatal::~LogMessageFatal() {
     AppendErrStrIfNecessary();
     std::string message_text = stream_.str();
+#if DEBUG 
     SendToLog(message_text);
+#endif
     Abort();
     exit(EXIT_FAILURE);
 }
@@ -129,26 +144,42 @@ absl::Mutex stderr_mu;
 #endif
 
 void LogMessage::SendToLog(const std::string& message_text) {
+#if DEBUG 
+
 #ifdef __FAAS_SRC
     absl::MutexLock lk(&stderr_mu);
 #endif
     fprintf(stderr, "%s\n", message_text.c_str());
     fflush(stderr);
+
+#endif 
 }
 
 void LogMessage::AppendErrStrIfNecessary() {
+#if DEBUG
     if (append_err_str_) {
         stream() << fmt::format(": {} [{}]", strerror(append_err_str_), preserved_errno_);
     }
+#endif
 }
 
 CheckOpMessageBuilder::CheckOpMessageBuilder(const char* exprtext)
-    : stream_(new std::ostringstream) { *stream_ << exprtext << " ("; }
+    : stream_(new std::ostringstream) { 
+#if DEBUG
+    *stream_ << exprtext << " ("; 
+#endif
+}
 
-CheckOpMessageBuilder::~CheckOpMessageBuilder() { delete stream_; }
+CheckOpMessageBuilder::~CheckOpMessageBuilder() { 
+#if DEBUG
+    delete stream_; 
+#endif
+}
 
 std::ostream* CheckOpMessageBuilder::ForVar2() {
+#if DEBUG
     *stream_ << " vs ";
+#endif
     return stream_;
 }
 
