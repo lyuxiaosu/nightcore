@@ -1,5 +1,6 @@
 #!/bin/bash
 
+ulimit -n 655350
 BASE_DIR=$(realpath $(dirname $0))
 NIGHTCORE_ROOT=$(realpath $(dirname $0)/../..)
 BUILD_TYPE=release
