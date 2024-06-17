@@ -30,7 +30,8 @@ if [ "$to" = "to-engine" ]; then
         echo "Loop iteration: $i"
         ssh -o stricthostkeychecking=no -i ./id_rsa xiaosuGW@$remote_ip "$path/run_stack.sh > 1.txt 2>&1 &"
         echo "start client..."
-        ./bypass_gw_curl.sh >> nightcore.log 
+        #./bypass_gw_curl.sh >> nightcore.log 
+        ./bypass_gw_curl.sh 
         
         ssh -o stricthostkeychecking=no -i ./id_rsa xiaosuGW@$remote_ip  "$path/kill_nightcore.sh"
 
