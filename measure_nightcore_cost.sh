@@ -27,22 +27,23 @@ chmod 400 ./id_rsa
 path="/my_mount/nightcore/examples/c"
 if [ "$to" = "to-engine" ]; then
     for ((i = 1; i <= $repeat_count; i++)); do
-        echo "Loop iteration: $i"
+        #echo "Loop iteration: $i"
         ssh -o stricthostkeychecking=no -i ./id_rsa xiaosuGW@$remote_ip "$path/run_stack.sh > 1.txt 2>&1 &"
-        echo "start client..."
+        sleep 3
+        #echo "start client..."
         #./bypass_gw_curl.sh >> nightcore.log 
         ./bypass_gw_curl.sh 
         
-        ssh -o stricthostkeychecking=no -i ./id_rsa xiaosuGW@$remote_ip  "$path/kill_nightcore.sh"
+        ssh -o stricthostkeychecking=no -i ./id_rsa xiaosuGW@$remote_ip  "$path/kill_nightcore.sh" > /dev/null 2>&1
 
     done 
 elif [ "$to" = "to-gateway" ]; then
     for ((i = 1; i <= $repeat_count; i++)); do
-        echo "Loop iteration: $i"
+        #echo "Loop iteration: $i"
         ssh -o stricthostkeychecking=no -i ./id_rsa xiaosuGW@$remote_ip "$path/run_stack.sh > 1.txt 2>&1 &"
-        echo "start client..."
+        #echo "start client..."
         ./gw_curl.sh >> nightcore.log
-        ssh -o stricthostkeychecking=no -i ./id_rsa xiaosuGW@$remote_ip  "$path/kill_nightcore.sh" 
+        ssh -o stricthostkeychecking=no -i ./id_rsa xiaosuGW@$remote_ip  "$path/kill_nightcore.sh" > /dev/null 2>&1 
     done
 
 fi
